@@ -1,0 +1,8 @@
+langgraph
+langchain-google-genai
+langchain-groq
+langsmith
+streamlit
+sqlalchemy
+psycopg2-binary
+python-dotenv
