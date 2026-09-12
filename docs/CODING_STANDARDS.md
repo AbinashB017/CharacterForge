@@ -145,12 +145,33 @@ named traces: `Test1-Matched-Jellyfish` and `Test2-Mismatched-Wolf-Warrior`.
 
 ## 8. Multi-Provider Architecture
 
-The active LLM provider is controlled by `LLM_PROVIDER` in `.env`:
+The active LLM provider is controlled by `LLM_PROVIDER` in `.env` (default: `groq`):
 
 | `LLM_PROVIDER` | Model | Notes |
 |---|---|---|
-| `groq` (default) | `openai/gpt-oss-120b` | Primary. Sufficient free-tier quota for iterative testing. |
-| `gemini` | `gemini-2.5-flash` | Fallback. 20 RPD free-tier limit — use only for spot checks. |
+| `groq` (default) | `openai/gpt-oss-120b` (both nodes) | Primary. 3-key rotation across 3 independent Groq accounts. |
+| `gemini` | `gemini-2.5-flash` (both nodes) | Final fallback. 20 RPD free-tier limit — used only when all Groq keys are exhausted. |
+
+**Full Fallback Chain:**
+`GROQ_API_KEY_1` → `GROQ_API_KEY_2` → `GROQ_API_KEY_3` → Gemini
+
+All fallback logic is centralised in [`graph/llm_client.py`](../graph/llm_client.py) via `invoke_with_fallback()`. Both `generator_node` and `reviewer_node` call this function directly — there is no longer any LLM setup code in `nodes.py` itself.
+
+**Two Independent Retry Tracks (do not confuse):**
+
+| Error Type | Behavior |
+|---|---|
+| `429 Rate Limit` | Rotate immediately to the next Groq key; do not retry on the current key. Logs `[Generator] Groq Key 1 rate-limited — switching to Groq Key 2`. |
+| Non-429 (e.g. `tool_use_failed`, malformed JSON) | Retry exactly once on the **same key**. If it fails twice, raise `RuntimeError` — key rotation does NOT apply. |
+
+> [!NOTE]
+> Groq returns `401 Invalid API Key` (not `429`) for an expired/invalid key. Our `is_rate_limit()` check correctly does NOT rotate on 401s — those fail fast after one retry. Only genuine quota exhaustion (429) triggers rotation.
+
+**Temperature:**
+- **Generator: `temperature=0.7`** — Creative writing benefits from variance across revision iterations, so the model explores different directions rather than producing near-identical drafts.
+- **Reviewer: `temperature=0`** — Deterministic scoring ensures the same draft receives the same score on every evaluation.
+
+**Dual-Model Architecture Attempt:** We initially experimented with using `qwen/qwen3.8-27b` for the Reviewer (to reduce self-agreement bias). Both `gpt-oss-20b` and `qwen3.8-27b` have free-tier output-token-per-minute limits too restrictive for our Reviewer's detailed multi-criteria JSON schema, causing consistent truncation failures. We reverted to `gpt-oss-120b` for both nodes. Test results demonstrate the 120b model produces genuinely critical, non-rubber-stamp reviews in practice.
 
 **Why 120b over 20b:** The `openai/gpt-oss-20b` model inconsistently completes complex
 tool-call responses (truncating the JSON mid-generation on the `ReviewOutput` schema).
@@ -159,5 +180,6 @@ The 120b model handles the nested `criteria_scores` array reliably.
 **Structured output mode:** Both providers use `with_structured_output(PydanticModel)`.
 Groq implements this via tool-calling (model generates tool arguments as free-form JSON;
 Groq parses it). This is less strictly enforced than Gemini's native JSON schema mode —
-malformed tool-call arguments surface as `tool_use_failed` and trigger the retry-once-then-fallback
-path in `generator_node` and `reviewer_node`.
+malformed tool-call arguments surface as `tool_use_failed` and trigger the retry-once
+path on the current key (not a key rotation).
+

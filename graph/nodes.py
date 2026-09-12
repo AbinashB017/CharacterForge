@@ -37,7 +37,7 @@ import time
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
+from graph.llm_client import invoke_with_fallback
 from sqlalchemy import text
 
 from db.connection import SessionLocal
@@ -103,41 +103,11 @@ def _db_write_critical(sql: str, params: dict, label: str) -> Any:
     return None
 
 
-# ── LLM helpers ───────────────────────────────────────────────────────────────
-
-def _get_llm():
-    """Returns the active LLM based on LLM_PROVIDER env var.
-    groq  → ChatGroq  (llama-3.3-70b-versatile, tool-calling structured output)
-    gemini → ChatGoogleGenerativeAI (fallback, original behaviour)
-    """
-    provider = os.environ.get("LLM_PROVIDER", "gemini").lower()
-    if provider == "groq":
-        from langchain_groq import ChatGroq
-        return ChatGroq(
-            model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            api_key=os.environ["GROQ_API_KEY"],
-            temperature=0,
-        )
-    return ChatGoogleGenerativeAI(
-        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        google_api_key=os.environ["GEMINI_API_KEY"],
-    )
-
-
-def _invoke_with_retry(chain, messages: list, label: str):
-    """
-    Attempts the LLM call once; retries once on any exception.
-    Raises RuntimeError (wrapping the last exception) after 2 failures.
-    """
-    last_exc: Exception | None = None
-    for attempt in range(2):
-        try:
-            return chain.invoke(messages)
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-    raise RuntimeError(
-        f"{label} failed after 2 attempts. Last error: {last_exc}"
-    ) from last_exc
+# ── LLM invocation is handled by graph/llm_client.py ────────────────────────
+# invoke_with_fallback(schema, messages, node_type, label) provides:
+#   - Groq key rotation on 429 (Key1 → Key2 → Key3)
+#   - Gemini as final fallback
+#   - Retry-once on same key for non-429 parse/output errors
 
 
 # ── Input Validator ────────────────────────────────────────────────────────────
@@ -201,7 +171,9 @@ def input_validator_node(state: BriefState) -> dict[str, Any]:
 
 def generator_node(state: BriefState) -> dict[str, Any]:
     """
-    Calls Gemini (with_structured_output → StorylineOutput) to draft a storyline.
+    Calls the LLM (with_structured_output → StorylineOutput) to draft a storyline.
+    Uses invoke_with_fallback: Groq Key1 → Key2 → Key3 → Gemini on 429s;
+    retries once on the same key for non-429 parse errors.
 
     On first call: generates from the brief alone.
     On revision calls (iteration > 0): injects latest_feedback into the prompt
@@ -211,14 +183,12 @@ def generator_node(state: BriefState) -> dict[str, Any]:
     On unrecoverable failure: writes a fallback review_feedback row and returns
       NEEDS_REVISION so the loop terminates naturally via the max_iterations cap.
     """
-    llm = _get_llm()
-    structured_llm = llm.with_structured_output(StorylineOutput)
     messages = build_generator_messages(state)
     new_iteration = state.get("iteration", 0) + 1
 
     try:
-        result: StorylineOutput = _invoke_with_retry(
-            structured_llm, messages, "Generator"
+        result: StorylineOutput = invoke_with_fallback(
+            StorylineOutput, messages, "generator", "Generator"
         )
     except RuntimeError as exc:
         # Unrecoverable: write a fallback review row for the audit trail, then
@@ -290,8 +260,10 @@ def generator_node(state: BriefState) -> dict[str, Any]:
 
 def reviewer_node(state: BriefState) -> dict[str, Any]:
     """
-    Calls Gemini (with_structured_output → ReviewOutput) to score current_draft
+    Calls the LLM (with_structured_output → ReviewOutput) to score current_draft
     against the ORIGINAL brief on 5 concrete criteria.
+    Uses invoke_with_fallback: Groq Key1 → Key2 → Key3 → Gemini on 429s;
+    retries once on the same key for non-429 parse errors.
 
     If current_draft is None (generator failed), skips the LLM call and
     passes through the existing verdict/feedback from the generator failure.
@@ -302,13 +274,11 @@ def reviewer_node(state: BriefState) -> dict[str, Any]:
     if state.get("current_draft") is None:
         return {}
 
-    llm = _get_llm()
-    structured_llm = llm.with_structured_output(ReviewOutput)
     messages = build_reviewer_messages(state)
 
     try:
-        result: ReviewOutput = _invoke_with_retry(
-            structured_llm, messages, "Reviewer"
+        result: ReviewOutput = invoke_with_fallback(
+            ReviewOutput, messages, "reviewer", "Reviewer"
         )
     except RuntimeError as exc:
         # Never silently approve — default to NEEDS_REVISION on parse failure.

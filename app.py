@@ -178,7 +178,12 @@ with col_form:
         st.caption("⚠️ Fill in all required fields (*) to enable generation.")
 
     provider = os.environ.get("LLM_PROVIDER", "gemini").upper()
-    model    = os.environ.get("GROQ_MODEL" if provider == "GROQ" else "GEMINI_MODEL", "unknown")
+    if provider == "GROQ":
+        gen_model = os.environ.get("GROQ_GENERATOR_MODEL", "unknown")
+        rev_model = os.environ.get("GROQ_REVIEWER_MODEL", "unknown")
+        model = f"Gen: {gen_model} | Rev: {rev_model}"
+    else:
+        model = os.environ.get("GEMINI_MODEL", "unknown")
 
     generate_clicked = st.button(
         "⚡ Generate Storyline",

@@ -3,9 +3,13 @@ Phase 2/4 — Test 1: Well-matched brief. Traces to LangSmith.
 Run from project root: python test1_matched.py
 """
 import os
+import sys
 import json
 from dotenv import load_dotenv
 load_dotenv()  # MUST be before any langchain import so LANGCHAIN_TRACING_V2 is set
+
+# Force UTF-8 output in Windows terminal
+sys.stdout.reconfigure(encoding='utf-8')
 
 from graph.build_graph import build_graph
 

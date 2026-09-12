@@ -5,7 +5,12 @@ This should naturally trigger at least one NEEDS_REVISION cycle.
 Run from project root: python test2_mismatched.py
 """
 import os
+import sys
 import json
+
+# Force UTF-8 output in Windows terminal
+sys.stdout.reconfigure(encoding='utf-8')
+
 from dotenv import load_dotenv
 load_dotenv()  # MUST be before any langchain import so LANGCHAIN_TRACING_V2 is set
 
